@@ -291,48 +291,50 @@ function extractMetadata(fontBytes, fmt) {
     return parsed;
 }
 
-// Multi-tier URL Fetcher (Direct + CORS Proxies)
+// Multi-tier URL Fetcher (Direct + Robust CORS Proxies)
 async function fetchWithCorsFallback(url) {
-    // 1. Direct fetch
-    try {
-        const r = await fetch(url);
-        if (r.ok) {
-            const buf = await r.arrayBuffer();
-            return { data: new Uint8Array(buf), finalUrl: url };
-        }
-    } catch (e) {}
+    const proxyList = [
+        url, // 1. Direct fetch
+        `https://cors.isteed.cc/${url}`, // 2. Fast CF Worker proxy
+        `https://proxy.cors.sh/${url}`, // 3. cors.sh proxy
+        `https://corsproxy.io/?url=${encodeURIComponent(url)}`, // 4. corsproxy
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}` // 5. allorigins
+    ];
     
-    // 2. CORS Proxy 1: corsproxy.io
-    try {
-        const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
-        const r = await fetch(proxyUrl);
-        if (r.ok) {
-            const buf = await r.arrayBuffer();
-            return { data: new Uint8Array(buf), finalUrl: url };
+    let lastErr = null;
+    for (const target of proxyList) {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 7000);
+            
+            const r = await fetch(target, { signal: controller.signal });
+            clearTimeout(timeoutId);
+            
+            if (r.ok) {
+                const buf = await r.arrayBuffer();
+                const u8 = new Uint8Array(buf);
+                
+                // If it looks like a valid font or stylesheet text, return it
+                const fmt = detectFontFormat(u8);
+                if (fmt !== 'unknown') {
+                    return { data: u8, finalUrl: url };
+                }
+                
+                // Check if it's text (CSS or HTML) vs Cloudflare bot challenge
+                const textHeader = new TextDecoder('utf-8').decode(u8.subarray(0, 150)).toLowerCase();
+                if (textHeader.includes('<!doctype') || textHeader.includes('<html') || textHeader.includes('cloudflare') || textHeader.includes('access denied')) {
+                    // Bot challenge or error page, skip to next proxy
+                    continue;
+                }
+                
+                return { data: u8, finalUrl: url };
+            }
+        } catch (e) {
+            lastErr = e;
         }
-    } catch (e) {}
+    }
     
-    // 3. CORS Proxy 2: allorigins.win
-    try {
-        const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-        const r = await fetch(proxyUrl);
-        if (r.ok) {
-            const buf = await r.arrayBuffer();
-            return { data: new Uint8Array(buf), finalUrl: url };
-        }
-    } catch (e) {}
-    
-    // 4. CORS Proxy 3: codetabs
-    try {
-        const proxyUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`;
-        const r = await fetch(proxyUrl);
-        if (r.ok) {
-            const buf = await r.arrayBuffer();
-            return { data: new Uint8Array(buf), finalUrl: url };
-        }
-    } catch (e) {}
-    
-    throw new Error(`Failed to fetch font from ${url}. Check your internet connection or URL.`);
+    throw new Error(`Could not fetch font across proxies (${lastErr ? lastErr.message : 'timeout'}).`);
 }
 
 // Decode Supply Family / Base64 URL parameter
@@ -381,7 +383,7 @@ async function handleUrlExtraction() {
             
             if (fmt !== 'unknown') {
                 const meta = extractMetadata(data, fmt);
-                let filename = targetUrl.split('?')[0].split('/').pop() || `font.${fmt}`;
+                let filename = decodeURIComponent(targetUrl.split('?')[0].split('/').pop()) || `font.${fmt}`;
                 if (!filename.includes('.')) filename += `.${fmt}`;
                 
                 await addFontEntry({
@@ -408,7 +410,7 @@ async function handleUrlExtraction() {
                             const subFmt = detectFontFormat(subRes.data);
                             if (subFmt !== 'unknown') {
                                 const subMeta = extractMetadata(subRes.data, subFmt);
-                                let subName = resolved.split('?')[0].split('/').pop() || `font.${subFmt}`;
+                                let subName = decodeURIComponent(resolved.split('?')[0].split('/').pop()) || `font.${subFmt}`;
                                 await addFontEntry({
                                     id: 'font_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
                                     filename: subName,
@@ -428,7 +430,12 @@ async function handleUrlExtraction() {
                 }
             }
         } catch (err) {
-            showAlert(`Error extracting ${inputUrl}: ${err.message}`, 'error');
+            const decodedUrl = decodeBase64UrlParam(inputUrl);
+            if (decodedUrl !== inputUrl) {
+                showHtmlAlert(`Extraction issue. Direct Link: <a href="${decodedUrl}" target="_blank" style="color: #fff; text-decoration: underline; font-weight: bold;">Download Font Directly</a> and drop it into the upload tab!`, 'error');
+            } else {
+                showAlert(`Error extracting ${inputUrl}: ${err.message}`, 'error');
+            }
         }
     }
     
@@ -784,7 +791,7 @@ function initTabs() {
 function initPresets() {
     const urlInput = document.getElementById('urlInput');
     document.getElementById('presetSupplyFamily').addEventListener('click', () => {
-        urlInput.value = "https://supply.family/wp-json/font-tester/v1/font/?font=aHR0cHM6Ly9zdG9yYWdlLmdvb2dsZWFwaXMuY29tL3N1cHBseWZhbWlseV9ob3N0L3dwLWNvbnRlbnQvZGlnaXRhbC1wcm9kdWN0cy1hdXRvbWF0ZWQvZmVic3BhY2Utc3R1ZGlvL2Zic2Z1bmVncmFsLWNvbXByZXNzZWQvZmJzZnVuZWdyYWwtY29tcHJlc3NlZC5vdGY=";
+        urlInput.value = "https://supply.family/wp-json/font-tester/v1/font/?font=aHR0cHM6Ly9zdG9yYWdlLmdvb2dsZWFwaXMuY29tL3N1cHBseWZhbWlseV9ob3N0L3dwLWNvbnRlbnQvZGlnaXRhbC1wcm9kdWN0cy1hdXRvbWF0ZWQvdHlwZS1tYW5pYS9Hb3NoLVRNL0dvc2glMjBUTS5vdGY=";
     });
     document.getElementById('presetDirectFont').addEventListener('click', () => {
         urlInput.value = "https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuLyfAZ9hjp-Ek-_EeA.woff2";
@@ -850,7 +857,15 @@ function showAlert(message, type = 'error') {
     alertBox.textContent = message;
     alertBox.className = `alert-box ${type}`;
     alertBox.classList.remove('hidden');
-    setTimeout(() => { alertBox.classList.add('hidden'); }, 6000);
+    setTimeout(() => { alertBox.classList.add('hidden'); }, 8000);
+}
+
+function showHtmlAlert(htmlMessage, type = 'error') {
+    const alertBox = document.getElementById('alertBox');
+    alertBox.innerHTML = htmlMessage;
+    alertBox.className = `alert-box ${type}`;
+    alertBox.classList.remove('hidden');
+    setTimeout(() => { alertBox.classList.add('hidden'); }, 12000);
 }
 
 window.inspectFont = inspectFont;
